@@ -12,6 +12,10 @@ type Props = {
   systemStatus: SystemStatus;
   alert?: { level: "info" | "warn" | "danger"; message: string } | null;
   link: { status: "CONNECTED" | "DEGRADED" | "LOST"; text: string };
+  /** telemetry transmitter state as the operator sees it */
+  tx: "ON" | "OFF" | "SILENT";
+  /** seconds until the automatic transmission stop (90 min after launch detect); null before launch */
+  txShutdownIn: number | null;
   nav: ReactNode;
   controls: ReactNode;
 };
@@ -22,6 +26,12 @@ const STATUS_COLOR: Record<SystemStatus, string> = {
   CRITICAL: "var(--destructive)",
 };
 const LINK_COLOR = { CONNECTED: "var(--ok)", DEGRADED: "var(--warn)", LOST: "var(--destructive)" } as const;
+
+const TX_COLOR = { ON: "var(--ok)", OFF: "var(--warn)", SILENT: "var(--destructive)" } as const;
+const mmss = (s: number) => {
+  const t = Math.max(0, Math.round(s));
+  return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+};
 
 const hms = (d: Date) => d.toISOString().slice(11, 19);
 
@@ -54,6 +64,8 @@ export function Header({
   systemStatus,
   alert,
   link,
+  tx,
+  txShutdownIn,
   nav,
   controls,
 }: Props) {
@@ -107,6 +119,21 @@ export function Header({
         <Item k="CanSat ↔ ground LoRa">
           <span className="readout text-[12px]" style={{ color: LINK_COLOR[link.status] }}>
             {link.status} <span className="opacity-70 text-[10.5px]">{link.text}</span>
+          </span>
+        </Item>
+
+        <Item k="Telemetry TX">
+          <span className="readout text-[12px]" style={{ color: TX_COLOR[tx] }}>
+            {tx}
+          </span>
+        </Item>
+        <Item k="Auto-shutdown (90 min)">
+          <span
+            className="readout text-[12px]"
+            style={{ color: txShutdownIn !== null && txShutdownIn < 300 ? "var(--warn)" : undefined }}
+            title="The rulebook requires transmission to stop 90 minutes after launch detect"
+          >
+            {txShutdownIn === null ? "WAITING FOR LAUNCH" : `T−${mmss(txShutdownIn)}`}
           </span>
         </Item>
 

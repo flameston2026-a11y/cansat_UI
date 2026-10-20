@@ -10,7 +10,7 @@ import {
   type LandingId,
 } from "../mission";
 import type { CansatFrame, CansatState, HealthItem, HistRow, MissionEventRec, TrackPt } from "../sim";
-import { RULEBOOK_STATES, TLM_FIELDS, csvCell, csvHeader, type Parsed, type Values } from "./protocol";
+import { RULEBOOK_STATES, TLM_FIELDS, accelCell, csvCell, csvHeader, type Parsed, type Values } from "./protocol";
 
 /**
  * Turns decoded packets into the CansatFrame the screens already draw.
@@ -42,6 +42,16 @@ export function mapState(text: string, landing: LandingId): CansatState {
     return "PRIMARY_DESCENT";
   if (s.includes("BOOT")) return "BOOT";
   return "STANDBY";
+}
+
+/** Competition rule: transmission stops 90 minutes after launch detect. */
+export const TX_SHUTDOWN_S = 90 * 60;
+
+/** True once the flight-software state is past LAUNCH_PAD (numeric 3 to 7 or the matching names). */
+function launched(text: string): boolean {
+  let s = text.trim().toUpperCase();
+  if (/^[0-7]$/.test(s)) s = RULEBOOK_STATES[Number(s)];
+  return /ASCENT|ROCKET_DEPLOY|DESCENT|AEROBREAK|IMPACT|EJECT|SEPAR|LAND|DEPLOY/.test(s);
 }
 
 const isSeparated = (st: CansatState) => st === "EJECTION" || st === "PRIMARY_DESCENT" || st === "CONTROLLED_DESCENT";
@@ -84,6 +94,7 @@ export class LiveFrameBuilder {
   private lastRxAt = 0;
   private rate = NAN;
   private tlmRows: Values[] = [];
+  private launchT: number | null = null; // time stamping at launch detect (first state past LAUNCH_PAD)
 
   reset() {
     Object.assign(this, new LiveFrameBuilder());
@@ -109,8 +120,14 @@ export class LiveFrameBuilder {
 
   /** CSV text of every telemetry packet received, with a header row. */
   csv(): string {
-    const rows = this.tlmRows.map((v) => TLM_FIELDS.map((d) => csvCell(d, v[d.key])).join(","));
-    return [TLM_FIELDS.map(csvHeader).join(","), ...rows].join("\r\n") + "\r\n";
+    // spec v1.0 layout: the accelerometer is ONE column, "ax;ay;az;roll;pitch"
+    const before = TLM_FIELDS.slice(0, 12);
+    const after = TLM_FIELDS.slice(15);
+    const head = [...before.map(csvHeader), "ACCELEROMETER (ax;ay;az m/s²;roll;pitch °)", ...after.map(csvHeader)];
+    const rows = this.tlmRows.map((v) =>
+      [...before.map((d) => csvCell(d, v[d.key])), accelCell(v), ...after.map((d) => csvCell(d, v[d.key]))].join(","),
+    );
+    return [head.join(","), ...rows].join("\r\n") + "\r\n";
   }
 
   /** Team ID from the latest packet (for the Flight_<TEAM_ID>.csv file name). */
@@ -173,6 +190,7 @@ export class LiveFrameBuilder {
     if (this.lastState !== null && st !== this.lastState) this.addEvent(this.axisNow(time), st.replace(/_/g, " "));
     if (isSeparated(st) && this.sepTime === null) this.markSeparation(time);
     this.lastState = st;
+    if (this.launchT === null && launched(String(v.state))) this.launchT = time;
 
     // motion
     const alt = num(v.alt);
@@ -232,8 +250,8 @@ export class LiveFrameBuilder {
       mx: NAN,
       my: NAN,
       mz: NAN,
-      roll: lnd ? num(lnd.roll) : NAN,
-      pitch: lnd ? num(lnd.pitch) : NAN,
+      roll: lnd && Number.isFinite(num(lnd.roll)) ? num(lnd.roll) : num(v.roll),
+      pitch: lnd && Number.isFinite(num(lnd.pitch)) ? num(lnd.pitch) : num(v.pitch),
       press: num(v.press) / 100,
       temp: num(v.temp),
       rh: num(v.hum),
@@ -267,6 +285,7 @@ export class LiveFrameBuilder {
   /** The CanSat restarted (its clock went backwards): begin a fresh flight view. */
   private newFlight() {
     this.firstTime = null;
+    this.launchT = null;
     this.sepTime = null;
     this.history = [];
     this.path = [];
@@ -321,8 +340,8 @@ export class LiveFrameBuilder {
 
     const arms = lnd ? num(lnd.arms) : 0;
     const thrustPct = lnd ? num(lnd.thrustPct) : 0;
-    const roll = lnd ? num(lnd.roll) : NAN;
-    const pitch = lnd ? num(lnd.pitch) : NAN;
+    const roll = lnd && Number.isFinite(num(lnd.roll)) ? num(lnd.roll) : v ? num(v.roll) : NAN;
+    const pitch = lnd && Number.isFinite(num(lnd.pitch)) ? num(lnd.pitch) : v ? num(v.pitch) : NAN;
     const bandIdx = lnd ? num(lnd.band) : 0;
     const vision = lnd ? String(lnd.vision).toUpperCase() : "OFF";
     const visionStatus: CansatFrame["visionStatus"] =
@@ -462,6 +481,8 @@ export class LiveFrameBuilder {
       targetLon: this.target.lon,
       propellers: arms >= 4 ? "DEPLOYED" : arms > 0 ? "DEPLOYING" : "STOWED",
       autoRestartIn: null,
+      txShutdownIn:
+        this.launchT !== null && this.lastTime !== null ? Math.max(0, TX_SHUTDOWN_S - (this.lastTime - this.launchT)) : null,
     };
   }
 

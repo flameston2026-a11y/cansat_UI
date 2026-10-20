@@ -72,6 +72,11 @@ function GroundStation() {
   const [screen, setScreen] = useState<ScreenId>("trajectory");
   const [drawer, setDrawer] = useState(false);
   const [stateTimes, setStateTimes] = useState<Record<string, string>>({});
+  // the last CXON / CXOFF the CanSat confirmed (live modes)
+  const [txCommanded, setTxCommanded] = useState<"ON" | "OFF" | null>(null);
+  // alert limits the operator can change
+  const [minVolt, setMinVolt] = useState(7.0);
+  const [minSats, setMinSats] = useState(5);
 
   const [entries, setEntries] = useState<ConsoleEntry[]>([]);
   const nextId = useRef(1);
@@ -142,6 +147,10 @@ function GroundStation() {
         }),
       );
       onStage?.(stage);
+      if (stage === "PASS") {
+        if (cmd.startsWith("START_TRANSMISSION") || cmd.startsWith("CXON")) setTxCommanded("ON");
+        if (cmd.startsWith("STOP_TELEMETRY") || cmd.startsWith("CXOFF")) setTxCommanded("OFF");
+      }
       if ((stage === "FAIL" || stage === "NAK") && cmd.startsWith("DEPLOY")) raiseParachuteFailure();
     });
   };
@@ -167,8 +176,10 @@ function GroundStation() {
     if (cansat.linkQuality < 58 || cansat.rssi < -100)
       list.push({ type: "COMMUNICATION LOST", level: "danger", source: "CANSAT" });
     if (stale) list.push({ type: "TELEMETRY TIMEOUT", level: "danger", source: "CANSAT" });
-    if (cansat.ina.busV < 7.0)
+    if (cansat.ina.busV < minVolt)
       list.push({ type: "LOW BATTERY", level: "warn", source: "CANSAT", detail: `${cansat.ina.busV.toFixed(2)} V` });
+    if (cansat.gnss.sats < minSats)
+      list.push({ type: "LOW SATELLITES", level: "warn", source: "CANSAT", detail: `${cansat.gnss.sats} sats` });
     if (cansat.sht.temp > 45)
       list.push({ type: "HIGH TEMPERATURE", level: "warn", source: "CANSAT", detail: `${cansat.sht.temp.toFixed(1)} °C` });
     if (cansat.gnss.fix !== "3D") list.push({ type: "GPS INVALID", level: "warn", source: "CANSAT" });
@@ -190,6 +201,9 @@ function GroundStation() {
     cansat.linkQuality,
     cansat.rssi,
     cansat.ina.busV,
+    cansat.gnss.sats,
+    minVolt,
+    minSats,
     cansat.sht.temp,
     cansat.gnss.fix,
     cansat.faults.join("|"),
@@ -269,6 +283,14 @@ function GroundStation() {
   const ageS = paused ? 0 : Math.max(0, (now - cansat.lastPacketAt) / 1000);
   const linkStatus = ageS > 3 ? "LOST" : cansat.linkQuality < 70 ? "DEGRADED" : "CONNECTED";
 
+  const tx: "ON" | "OFF" | "SILENT" = !link.live
+    ? "ON"
+    : ageS <= 3
+      ? "ON"
+      : txCommanded === "OFF"
+        ? "OFF"
+        : "SILENT";
+
   const navBtn = (id: ScreenId, label: string) => (
     <button
       key={id}
@@ -330,6 +352,8 @@ function GroundStation() {
           status: linkStatus,
           text: `${link.live ? link.mode.toUpperCase() : "SIMULATED"} · ${cansat.rssi.toFixed(0)} dBm · SNR ${cansat.snr.toFixed(1)} dB`,
         }}
+        tx={tx}
+        txShutdownIn={cansat.txShutdownIn}
         nav={SCREENS.map((s) => navBtn(s.id, s.label))}
         controls={controls}
       />
@@ -358,6 +382,32 @@ function GroundStation() {
         {screen === "commands" ? (
           <div className={`${scrollPage} flex flex-col gap-4`}>
             <CommandsPanel f={cansat} onCommand={onCommand} onSetTarget={onSetTarget} />
+            <div className="panel p-3 flex flex-wrap items-center gap-x-6 gap-y-2">
+              <span className="label-mono text-[10px]">Alert limits</span>
+              <label className="flex items-center gap-2 text-[12px]">
+                Low battery below
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={minVolt}
+                  onChange={(e) => setMinVolt(Number(e.target.value) || 0)}
+                  className="w-16 rounded border bg-transparent px-1.5 py-0.5 readout"
+                />
+                V
+              </label>
+              <label className="flex items-center gap-2 text-[12px]">
+                Low satellites below
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  value={minSats}
+                  onChange={(e) => setMinSats(Number(e.target.value) || 0)}
+                  className="w-14 rounded border bg-transparent px-1.5 py-0.5 readout"
+                />
+              </label>
+            </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <AlertsPanel active={activeAlerts} history={alertHistory} />
               <CommandConsole entries={entries} />

@@ -3,6 +3,7 @@ import { AlertTriangle } from "lucide-react";
 export type AlertType =
   | "COMMUNICATION LOST"
   | "LOW BATTERY"
+  | "LOW SATELLITES"
   | "HIGH TEMPERATURE"
   | "GPS INVALID"
   | "PARACHUTE COMMAND FAILED"

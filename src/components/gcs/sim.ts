@@ -200,6 +200,8 @@ export type CansatFrame = {
   targetLon: number;
   propellers: "STOWED" | "DEPLOYING" | "DEPLOYED";
   autoRestartIn: number | null;
+  /** seconds until the competition's automatic transmission stop (90 min after launch detect); null before launch */
+  txShutdownIn: number | null;
 };
 
 // ---- Random helpers ------------------------------------------------------
@@ -952,6 +954,7 @@ export function snapshot(s: SimState): CansatFrame {
     targetLat: enuToLatLon(s.tgt[0], s.tgt[1])[0],
     targetLon: enuToLatLon(s.tgt[0], s.tgt[1])[1],
     propellers: armsOpen === 4 ? "DEPLOYED" : armsOpen > 0 || s.landing === "L1" ? "DEPLOYING" : "STOWED",
+    txShutdownIn: met >= 0 ? Math.max(0, 5400 - met) : null,
     autoRestartIn: s.state === "MISSION_COMPLETE" && s.landedT !== null ? Math.max(0, 14 - (s.t - s.landedT - 6)) : null,
   };
 

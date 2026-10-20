@@ -152,7 +152,11 @@ function parseFields(defs: FieldDef[], cols: string[]): { values: Values; warnin
       values[d.key] = raw;
       continue;
     }
-    if (raw === "" || !/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(raw)) {
+    if (raw === "") {
+      values[d.key] = NaN; // spec v1.0: an empty field means "no valid reading"
+      continue;
+    }
+    if (!/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(raw)) {
       values[d.key] = NaN;
       warnings.push(`${d.label}: "${raw}" is not a number`);
       continue;
@@ -252,20 +256,72 @@ export function parseLine(rawLine: string): Parsed | null {
   if (!u.ok) return { kind: "error", error: u.error, raw };
   const cols = u.body.split(",");
   if (cols[0].trim().toUpperCase() === "TEAM_ID" || cols[0].trim().toUpperCase() === "TEAM ID") return { kind: "header", raw };
-  const r = parseFields(TLM_FIELDS, cols);
-  return "error" in r ? { kind: "error", error: `TLM ${r.error}`, raw } : { kind: "tlm", ...r, raw };
+  const wide = expandWire(cols);
+  if ("error" in wide) return { kind: "error", error: `TLM ${wide.error}`, raw };
+  const r = parseFields(TLM_FIELDS, wide.cols);
+  if ("error" in r) return { kind: "error", error: `TLM ${r.error}`, raw };
+  r.values.roll = wide.roll;
+  r.values.pitch = wide.pitch;
+  return { kind: "tlm", ...r, raw };
+}
+
+/** Spec v1.0 wire line: 17 columns, the accelerometer is ONE field "ax;ay;az[;roll;pitch]". */
+export const WIRE_COLS = 17;
+const ACCEL_AT = 12;
+
+function angle(s: string | undefined): number {
+  const t = (s ?? "").trim();
+  if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(t)) return NaN;
+  const v = Number(t);
+  return v >= -180 && v <= 180 ? v : NaN;
+}
+
+/** Turn a 17-column wire line into the internal 19 columns (ax, ay, az separate). Legacy 19-column lines pass through. */
+function expandWire(cols: string[]): { cols: string[]; roll: number; pitch: number } | { error: string } {
+  if (cols.length === TLM_FIELDS.length) return { cols, roll: NaN, pitch: NaN };
+  if (cols.length !== WIRE_COLS) return { error: `expected ${WIRE_COLS} fields (or ${TLM_FIELDS.length}), got ${cols.length}` };
+  const parts = cols[ACCEL_AT].split(";");
+  if (parts.length !== 1 && parts.length !== 3 && parts.length !== 5)
+    return { error: "accelerometer field needs ax;ay;az or ax;ay;az;roll;pitch" };
+  if (parts.length === 1 && parts[0].trim() !== "") return { error: "accelerometer field needs ax;ay;az or ax;ay;az;roll;pitch" };
+  const [ax = "", ay = "", az = ""] = parts.length === 1 ? [] : parts;
+  return {
+    cols: [...cols.slice(0, ACCEL_AT), ax, ay, az, ...cols.slice(ACCEL_AT + 1)],
+    roll: angle(parts[3]),
+    pitch: angle(parts[4]),
+  };
 }
 
 // ---- building packets (virtual CanSat, tests) -------------------------------
+/** Decimals on the wire (spec v1.0): GNSS latitude/longitude carry 6 for the landing logic. */
+const TX_DECIMALS: Record<string, number> = {
+  time: 1, alt: 1, press: 0, temp: 1, volt: 2, gnssTime: 0, lat: 6, lon: 6, gnssAlt: 1, spin: 1, hum: 1, curr: 0,
+};
+
 const fmt = (d: FieldDef, v: number | string): string => {
   if (d.type === "str") return String(v);
   const n = Number(v);
   if (d.type === "int") return String(Math.round(n));
-  return Number.isFinite(n) ? String(Math.round(n * 1e4) / 1e4) : "";
+  if (!Number.isFinite(n)) return "";
+  const dec = TX_DECIMALS[d.key];
+  return dec !== undefined ? n.toFixed(dec) : String(Math.round(n * 1e4) / 1e4);
 };
 
-export function encodeTlm(values: Values, withChecksum = true): string {
-  const body = TLM_FIELDS.map((d) => fmt(d, values[d.key] ?? (d.type === "str" ? "" : NaN))).join(",");
+/** Accelerometer cell of the wire line: ax;ay;az;roll;pitch, empty when nothing is known. */
+export function accelCell(v: Values, dec = 2): string {
+  const one = (k: string) => {
+    const n = Number(v[k]);
+    return Number.isFinite(n) ? String(Math.round(n * 10 ** dec) / 10 ** dec) : "";
+  };
+  const cells = ["ax", "ay", "az", "roll", "pitch"].map(one);
+  if (cells.every((c) => c === "")) return "";
+  return (cells[3] === "" && cells[4] === "" ? cells.slice(0, 3) : cells).join(";");
+}
+
+/** Spec v1.0 telemetry line (17 columns). No checksum by default, as the spec says. */
+export function encodeTlm(values: Values, withChecksum = false): string {
+  const cell = (d: FieldDef) => fmt(d, values[d.key] ?? (d.type === "str" ? "" : NaN));
+  const body = [...TLM_FIELDS.slice(0, ACCEL_AT).map(cell), accelCell(values), ...TLM_FIELDS.slice(ACCEL_AT + 3).map(cell)].join(",");
   return withChecksum ? `${body}*${xorChecksum(body)}` : body;
 }
 

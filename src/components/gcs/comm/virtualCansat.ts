@@ -10,6 +10,11 @@ import {
   type Values,
 } from "./protocol";
 
+/** Spec v1.0 flight-state numbers 0 to 7 for the simulator's states. */
+const SPEC_STATE: Record<string, number> = {
+  BOOT: 0, STANDBY: 2, EJECTION: 4, PRIMARY_DESCENT: 5, CONTROLLED_DESCENT: 6, LANDED: 7, MISSION_COMPLETE: 7,
+};
+
 export const VIRTUAL_TEAM_ID = "2026-IN-SPACe-CAN-7USAT-020";
 
 export type CmdReply = { ack: string; exe?: { line: string; delayMs: number } };
@@ -60,15 +65,17 @@ export class VirtualCansat {
         temp: f.sht.temp,
         volt: f.ina.busV,
         gnssTime: h * 3600 + m * 60 + sec,
-        lat: f.gnss.fix === "3D" ? f.gnss.lat : 0,
-        lon: f.gnss.fix === "3D" ? f.gnss.lon : 0,
+        lat: f.gnss.fix === "3D" ? f.gnss.lat : NaN,
+        lon: f.gnss.fix === "3D" ? f.gnss.lon : NaN,
         gnssAlt: f.gnss.alt,
         sats: f.gnss.sats,
         ax: f.imu.ax,
         ay: f.imu.ay,
         az: f.imu.az,
+        roll: f.imu.roll,
+        pitch: f.imu.pitch,
         spin: f.imu.gz,
-        state: f.state,
+        state: SPEC_STATE[f.state] ?? 2,
         hum: f.sht.rh,
         curr: f.ina.currentMA,
       };
