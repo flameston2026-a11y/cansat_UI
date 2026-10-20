@@ -98,7 +98,15 @@ export class GroundLink {
   }
 
   feedLine(line: string, now = Date.now()) {
-    const t = line.trim();
+    let t = line.trim();
+    if (!t) return;
+    // ground Teensy debug output: "RAW RAK: <module line>" carries the real data; the
+    // human-readable banner lines below it are duplicates and are not packets
+    t = t.replace(/^RAW RAK:\s*/i, "");
+    if (/^-{3,}|^(RSSI|SNR|DATA):|^Starting\/restarting|^AT\+/i.test(t)) {
+      this.rawLog.push(`${new Date(now).toISOString()} ${t}`);
+      return;
+    }
     if (!t) return;
     this.rawLog.push(`${new Date(now).toISOString()} ${t}`);
     if (this.rawLog.length > 50000) this.rawLog.shift();

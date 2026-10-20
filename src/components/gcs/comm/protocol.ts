@@ -186,7 +186,12 @@ const KV_KEYS: Record<string, string> = {
   ALT: "alt", ALTITUDE: "alt", PRESS: "press", PRESSURE: "press", TEMP: "temp", VBAT: "volt", VOLT: "volt", VOLTAGE: "volt",
   LAT: "lat", LON: "lon", LONG: "lon", GALT: "gnssAlt", SATS: "sats", HUM: "hum", CURR: "curr", SPIN: "spin",
   AX: "ax", AY: "ay", AZ: "az",
+  // keys sent by the CanSat bench firmware (ALT,P,T,H,AX..AZ,GX..GZ,MX..MZ)
+  P: "press", T: "temp", H: "hum", GZ: "spin", GX: "gx", GY: "gy", MX: "mx", MY: "my", MZ: "mz",
 };
+/** Unit conversion for bench keys: P arrives in hPa, AX/AY/AZ in milli-g (ASSUMPTION, confirm with firmware). */
+const KV_SCALE: Record<string, number> = { P: 100, PRESS: 1, AX: 0.00980665, AY: 0.00980665, AZ: 0.00980665 };
+const KV_EXTRA = new Set(["gx", "gy", "mx", "my", "mz"]);
 
 export function isKvTestLine(raw: string): boolean {
   const parts = raw.split(",");
@@ -202,12 +207,17 @@ export function parseKvTest(raw: string, time: number, count: number): Parsed {
   for (const p of raw.split(",")) {
     const [k, v] = p.split("=").map((s) => s.trim());
     const key = KV_KEYS[k.toUpperCase()];
+    if (KV_EXTRA.has(key)) {
+      values[key] = Number(v);
+      seen.push(k);
+      continue;
+    }
     const def = TLM_FIELDS.find((d) => d.key === key);
     if (!def) {
       warnings.push(`unknown key ${k}`);
       continue;
     }
-    const n = Number(v);
+    const n = Number(v) * (KV_SCALE[k.toUpperCase()] ?? 1);
     const ok = Number.isFinite(n) && (def.min === undefined || n >= def.min) && (def.max === undefined || n <= def.max);
     values[def.key] = ok ? n : NaN;
     if (!ok) warnings.push(`${k} out of range`);
