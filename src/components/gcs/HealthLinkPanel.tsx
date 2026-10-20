@@ -104,7 +104,7 @@ export function HealthLinkPanel({ f }: { f: CansatFrame }) {
 
         <div className="well p-2.5">
           <KV k="Radio" v="RAK3272S LoRa P2P" />
-          <KV k="Frequency" v="868 MHz" />
+          <KV k="Frequency" v="865.25 MHz" />
           <KV k="Telemetry rate" v={f1(f.updateRate)} unit="Hz" />
           <KV k="Slant range to CanSat" v={f0(f.slantFromGs)} unit="m" />
           <KV k="Packet format" v="16-field ASCII CSV · CR" />

@@ -233,11 +233,14 @@ export function LinkScreen({ link }: { link: Link }) {
       <div className="panel p-3 flex flex-col gap-1.5">
         <PanelTitle title="Ground receiver setup (RAK3272S, via PuTTY once)" />
         <pre className="well p-2.5 text-[11px] leading-relaxed overflow-x-auto font-mono opacity-90">{`AT+NWM=0                          (LoRa P2P mode)
-AT+P2P=868000000:10:125:0:8:14    (frequency:SF:BW:CR:preamble:power, must equal the CanSat)
+AT+P2P=865250000:9:125:0:8:10    (frequency:SF:BW:CR:preamble:power)
 AT+PRECV=65534                    (continuous receive; this app re-sends it after every transmit)`}</pre>
         <p className="text-[10.5px] opacity-60 leading-snug">
-          These values are placeholders. Use the exact settings the electronics team configured on the CanSat. The AT output format
-          (+EVT:RXP2P) follows RAK's RUI3 firmware, so confirm it against your firmware version with the loopback test and a real packet.
+          Team 020 assignment: single channel 865.25 MHz (no backup), SF9, 125 kHz, coding rate 4/5, LoRa P2P sync word 0x54, about +10 dBm
+          on the pad and +14 dBm in flight. The CanSat and this receiver must match exactly. Set the sync word with the module's
+          sync-word command (check the RUI3 manual for your firmware's exact syntax), and confirm the preamble (8 shown) and the
+          AT+P2P argument format against your firmware version. The receive format (+EVT:RXP2P:rssi:snr:hex) has been confirmed with a real packet.
+          Bench-test lines like ALT=100.0,TEMP=28.0,VBAT=18.50 are also shown, marked as test data.
         </p>
       </div>
     </div>

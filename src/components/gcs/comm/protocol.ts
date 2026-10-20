@@ -177,6 +177,45 @@ export type Parsed =
   | { kind: "header"; raw: string }
   | { kind: "error"; error: string; raw: string };
 
+/** Bench-test lines like `ALT=100.0,TEMP=28.0,VBAT=18.50` (key=value, no packet count or time). */
+const KV_KEYS: Record<string, string> = {
+  ALT: "alt", ALTITUDE: "alt", PRESS: "press", PRESSURE: "press", TEMP: "temp", VBAT: "volt", VOLT: "volt", VOLTAGE: "volt",
+  LAT: "lat", LON: "lon", LONG: "lon", GALT: "gnssAlt", SATS: "sats", HUM: "hum", CURR: "curr", SPIN: "spin",
+  AX: "ax", AY: "ay", AZ: "az",
+};
+
+export function isKvTestLine(raw: string): boolean {
+  const parts = raw.split(",");
+  return parts.length > 0 && parts.every((p) => /^\s*[A-Za-z_]+\s*=\s*-?[\d.]+\s*$/.test(p));
+}
+
+/** Values for a bench-test line; unknown keys are ignored, everything else stays NaN ("—" on screen). */
+export function parseKvTest(raw: string, time: number, count: number): Parsed {
+  const values: Values = {};
+  for (const d of TLM_FIELDS) values[d.key] = d.type === "str" ? "" : NaN;
+  const seen: string[] = [];
+  const warnings: string[] = ["bench test line (not flight telemetry)"];
+  for (const p of raw.split(",")) {
+    const [k, v] = p.split("=").map((s) => s.trim());
+    const key = KV_KEYS[k.toUpperCase()];
+    const def = TLM_FIELDS.find((d) => d.key === key);
+    if (!def) {
+      warnings.push(`unknown key ${k}`);
+      continue;
+    }
+    const n = Number(v);
+    const ok = Number.isFinite(n) && (def.min === undefined || n >= def.min) && (def.max === undefined || n <= def.max);
+    values[def.key] = ok ? n : NaN;
+    if (!ok) warnings.push(`${k} out of range`);
+    seen.push(k);
+  }
+  values.teamId = "BENCH-TEST";
+  values.time = time;
+  values.count = count;
+  values.state = "TEST_MODE";
+  return { kind: "tlm", values, warnings, raw };
+}
+
 export function parseLine(rawLine: string): Parsed | null {
   const raw = rawLine.replace(/[\r\n]+/g, "").trim();
   if (raw === "") return null;

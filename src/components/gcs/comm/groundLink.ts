@@ -3,6 +3,8 @@ import {
   LineSplitter,
   RAK_RX,
   encodeCmd,
+  isKvTestLine,
+  parseKvTest,
   parseLine,
   parseRakLine,
   rakSend,
@@ -45,6 +47,8 @@ export class GroundLink {
   private splitter = new LineSplitter();
   private pending = new Map<number, Pending>();
   private logId = 0;
+  private kvFirstAt = 0;
+  private kvCount = 0;
   private cmdId = 1;
   private listeners = new Set<() => void>();
 
@@ -69,6 +73,8 @@ export class GroundLink {
   /** Clear the decoded data and the monitor (keeps nothing of the previous flight). */
   reset() {
     this.builder.reset();
+    this.kvFirstAt = 0;
+    this.kvCount = 0;
     this.log = [];
     this.rawLog = [];
     this.cancelPending("RESET");
@@ -116,7 +122,12 @@ export class GroundLink {
   }
 
   private process(payload: string, rx: { rssi?: number; snr?: number; at: number }) {
-    const p: Parsed | null = parseLine(payload);
+    let p: Parsed | null;
+    if (isKvTestLine(payload.trim())) {
+      // bench-test transmitter (ALT=..,TEMP=..,VBAT=..): the ground side supplies time and packet count
+      if (this.kvFirstAt === 0) this.kvFirstAt = rx.at;
+      p = parseKvTest(payload.trim(), (rx.at - this.kvFirstAt) / 1000, ++this.kvCount);
+    } else p = parseLine(payload);
     if (!p) return;
     switch (p.kind) {
       case "tlm":
