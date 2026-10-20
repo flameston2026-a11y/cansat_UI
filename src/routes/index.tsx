@@ -22,8 +22,10 @@ import type { CmdStage } from "@/components/gcs/CommandButton";
 import type { CommandResult, PlaybackSpeed } from "@/components/gcs/telemetry";
 import { useGroundLink } from "@/components/gcs/comm/useGroundLink";
 import { LinkScreen } from "@/components/gcs/LinkScreen";
-import "@/components/gcs/comm/safeNumber";
+import { installSafeNumber } from "@/components/gcs/comm/safeNumber";
 import { MISSION_ID, SITE_NAME } from "@/components/gcs/mission";
+
+installSafeNumber(); // unknown values print as a dash instead of NaN (see safeNumber.ts)
 
 export const Route = createFileRoute("/")({
   component: GroundStation,

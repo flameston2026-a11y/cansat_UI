@@ -5,7 +5,13 @@
  * are formatted exactly as before.
  */
 const original = Number.prototype.toFixed;
-if (!(original as unknown as { __safe?: boolean }).__safe) {
+
+/**
+ * Must be CALLED, not just imported: package.json declares "sideEffects": false,
+ * so a bare `import "./safeNumber"` is removed from the production bundle.
+ */
+export function installSafeNumber(): void {
+  if ((Number.prototype.toFixed as unknown as { __safe?: boolean }).__safe) return;
   const safe = function (this: number, digits?: number) {
     const v = Number(this);
     return Number.isFinite(v) ? original.call(v, digits) : "—";
@@ -13,4 +19,5 @@ if (!(original as unknown as { __safe?: boolean }).__safe) {
   (safe as unknown as { __safe: boolean }).__safe = true;
   Number.prototype.toFixed = safe;
 }
-export {};
+
+installSafeNumber();
