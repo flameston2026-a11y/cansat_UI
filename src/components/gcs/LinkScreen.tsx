@@ -222,7 +222,7 @@ export function LinkScreen({ link }: { link: Link }) {
           <div className="panel p-3 flex flex-col gap-2">
             <PanelTitle title="Latest Decoded Fields" />
             <div className="well p-2 overflow-y-auto scroll-thin max-h-[420px]">
-              <FieldTable title="Telemetry (16 mandatory fields)" defs={TLM_FIELDS} values={link.fields.tlm} />
+              <FieldTable title="Telemetry (15 mandatory + optional fields)" defs={TLM_FIELDS} values={link.fields.tlm} />
               <FieldTable title="Landing-logic extension ($LND)" defs={LND_FIELDS} values={link.fields.lnd} />
             </div>
           </div>
