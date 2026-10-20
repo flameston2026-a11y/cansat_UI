@@ -11,7 +11,7 @@ type SerialPortLike = {
   writable: WritableStream<Uint8Array> | null;
   getInfo?: () => { usbVendorId?: number; usbProductId?: number };
 };
-type SerialLike = { requestPort(): Promise<SerialPortLike> };
+type SerialLike = { requestPort(): Promise<SerialPortLike>; getPorts(): Promise<SerialPortLike[]> };
 
 export const serialSupported = (): boolean => typeof navigator !== "undefined" && "serial" in navigator;
 
@@ -27,7 +27,9 @@ export async function openSerial(
   onClosed: (error?: string) => void,
 ): Promise<OpenSerial> {
   const serial = (navigator as unknown as { serial: SerialLike }).serial;
-  const port = await serial.requestPort(); // the browser shows its own port picker
+  // one port already authorised for this site: use it without the picker; otherwise show the picker
+  const granted = await serial.getPorts().catch(() => [] as SerialPortLike[]);
+  const port = granted.length === 1 ? granted[0] : await serial.requestPort();
   await port.open({ baudRate });
   if (!port.readable || !port.writable) throw new Error("port opened without streams");
 
