@@ -49,6 +49,9 @@ export class GroundLink {
   private logId = 0;
   private kvFirstAt = 0;
   private kvCount = 0;
+  private held: { text: string; rssi?: number; at: number } | null = null;
+  private nextRssi?: number;
+  private nextSnr?: number;
   private cmdId = 1;
   private listeners = new Set<() => void>();
 
@@ -75,6 +78,7 @@ export class GroundLink {
     this.builder.reset();
     this.kvFirstAt = 0;
     this.kvCount = 0;
+    this.held = null;
     this.log = [];
     this.rawLog = [];
     this.cancelPending("RESET");
@@ -97,14 +101,50 @@ export class GroundLink {
     for (const line of this.splitter.push(text)) this.feedLine(line);
   }
 
+  /** Release the held 13-value packet, attaching the RSSI/SNR printed around it. */
+  private flushHeld(now: number) {
+    const h = this.held;
+    if (!h) return;
+    this.held = null;
+    this.process(h.text, { rssi: h.rssi ?? this.nextRssi, snr: this.nextSnr, at: h.at || now });
+    this.nextSnr = undefined;
+    this.emit();
+  }
+
   feedLine(line: string, now = Date.now()) {
     let t = line.trim();
     if (!t) return;
     // ground Teensy debug output: "RAW RAK: <module line>" carries the real data; the
     // human-readable banner lines below it are duplicates and are not packets
     t = t.replace(/^RAW RAK:\s*/i, "");
-    if (/^-{3,}|^(RSSI|SNR|DATA):|^Starting\/restarting|^AT\+/i.test(t)) {
-      this.rawLog.push(`${new Date(now).toISOString()} ${t}`);
+    const stamp = new Date(now).toISOString();
+
+    // ground Teensy "pretty" output. Per packet it prints: RSSI line, a bare 13-value line
+    // (ALT,P,T,H,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ), an SNR line, then a decorated block that repeats
+    // the same numbers. Only the bare line is data; RSSI/SNR are attached to it.
+    const lvl = /^(RSSI|SNR)\s*:\s*(-?\d+(?:\.\d+)?)/i.exec(t);
+    if (lvl) {
+      this.rawLog.push(`${stamp} ${t}`);
+      const v = Number(lvl[2]);
+      if (lvl[1].toUpperCase() === "RSSI") this.nextRssi = v;
+      else {
+        this.nextSnr = v;
+        this.flushHeld(now);
+      }
+      return;
+    }
+    if (/^-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?){12}$/.test(t)) {
+      this.rawLog.push(`${stamp} ${t}`);
+      this.flushHeld(now); // a previous packet that never got its SNR line
+      const f = t.split(",");
+      const keys = ["ALT", "P", "T", "H", "AX", "AY", "AZ", "GX", "GY", "GZ", "MX", "MY", "MZ"];
+      this.held = { text: keys.map((k, i) => `${k}=${f[i]}`).join(","), rssi: this.nextRssi, at: now };
+      this.nextRssi = undefined;
+      return;
+    }
+    if (/^-{3,}|^={3,}|^\[[A-Z &]+\]$|^[A-Za-z][A-Za-z ]*:\s*-?[\d.]+\s*(?:m|mbar|hPa|C|%|dB|dBm)?$|^(DATA|LoRa receive|Starting\/restarting)|^AT\+/i.test(t)) {
+      this.rawLog.push(`${stamp} ${t}`);
+      if (/^={3,}/.test(t)) this.flushHeld(now);
       return;
     }
     if (!t) return;
