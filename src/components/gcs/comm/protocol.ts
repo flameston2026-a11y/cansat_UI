@@ -272,6 +272,7 @@ export function parseLine(rawLine: string): Parsed | null {
   if ("error" in r) return { kind: "error", error: `TLM ${r.error}`, raw };
   r.values.roll = wide.roll;
   r.values.pitch = wide.pitch;
+  for (const [k, v] of Object.entries(wide.extra ?? {})) r.values[k] = v;
   return { kind: "tlm", ...r, raw };
 }
 
@@ -287,14 +288,46 @@ function angle(s: string | undefined): number {
 }
 
 /** Turn a 17-column wire line into the internal 19 columns (ax, ay, az separate). Legacy 19-column lines pass through. */
-function expandWire(cols: string[]): { cols: string[]; roll: number; pitch: number } | { error: string } {
+type Wide = { cols: string[]; roll: number; pitch: number; extra?: Record<string, number> };
+
+/** Team firmware line: the 15 rulebook columns + ONE optional column "HUMIDITY=..;GYRO_X=..;MAG_X=..;..". */
+const OPT_KEYS: Record<string, string> = {
+  HUMIDITY: "hum", CURRENT: "curr", GYRO_X: "gx", GYRO_Y: "gy", GYRO_Z: "gz", MAG_X: "mx", MAG_Y: "my", MAG_Z: "mz", ROLL: "roll", PITCH: "pitch",
+};
+function fromFirmware16(cols: string[]): Wide | { error: string } {
+  const extra: Record<string, number> = {};
+  for (const kv of (cols[15] ?? "").split(";")) {
+    const [k, v] = kv.split("=").map((s) => s?.trim());
+    const key = OPT_KEYS[(k ?? "").toUpperCase()];
+    const n = Number(v);
+    if (key && v !== undefined && v !== "" && Number.isFinite(n)) extra[key] = n;
+  }
+  const hum = extra.hum !== undefined ? String(extra.hum) : "";
+  const curr = extra.curr !== undefined ? String(extra.curr) : "";
+  delete extra.hum;
+  delete extra.curr;
+  const w = expandWire([...cols.slice(0, 15), hum, curr]);
+  if ("error" in w) return w;
+  const roll = Number.isFinite(extra.roll) ? extra.roll : w.roll;
+  const pitch = Number.isFinite(extra.pitch) ? extra.pitch : w.pitch;
+  delete extra.roll;
+  delete extra.pitch;
+  return { ...w, roll, pitch, extra };
+}
+
+function expandWire(cols: string[]): Wide | { error: string } {
   if (cols.length === TLM_FIELDS.length) return { cols, roll: NaN, pitch: NaN };
-  if (cols.length !== WIRE_COLS) return { error: `expected ${WIRE_COLS} fields (or ${TLM_FIELDS.length}), got ${cols.length}` };
+  if (cols.length === 16) return fromFirmware16(cols);
+  if (cols.length !== WIRE_COLS) return { error: `expected ${WIRE_COLS} fields (or 16 or ${TLM_FIELDS.length}), got ${cols.length}` };
   const parts = cols[ACCEL_AT].split(";");
   if (parts.length !== 1 && parts.length !== 3 && parts.length !== 5)
     return { error: "accelerometer field needs ax;ay;az or ax;ay;az;roll;pitch" };
   if (parts.length === 1 && parts[0].trim() !== "") return { error: "accelerometer field needs ax;ay;az or ax;ay;az;roll;pitch" };
-  const [ax = "", ay = "", az = ""] = parts.length === 1 ? [] : parts;
+  let [ax = "", ay = "", az = ""] = parts.length === 1 ? [] : parts;
+  // The ICM-20948 library reports milli-g. The rulebook wants m/s², and 1 g is only 9.8 there, so a
+  // resting magnitude near 1000 can only be milli-g: convert it (a firmware fix to m/s² passes through).
+  const mag = Math.hypot(Number(ax), Number(ay), Number(az));
+  if (Number.isFinite(mag) && mag > 50) [ax, ay, az] = [ax, ay, az].map((s) => (Number(s) * 0.00980665).toFixed(2));
   return {
     cols: [...cols.slice(0, ACCEL_AT), ax, ay, az, ...cols.slice(ACCEL_AT + 1)],
     roll: angle(parts[3]),

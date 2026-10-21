@@ -142,7 +142,7 @@ export class GroundLink {
       this.nextRssi = undefined;
       return;
     }
-    if (/^-{3,}|^={3,}|^\[[A-Z &]+\]$|^[A-Za-z][A-Za-z ]*:\s*-?[\d.]+\s*(?:m|mbar|hPa|C|%|dB|dBm)?$|^(DATA|LoRa receive|Starting\/restarting)|^AT\+/i.test(t)) {
+    if (/^-{3,}|^={3,}|^\[[A-Z &]+\]$|^[A-Za-z][A-Za-z ]*:\s*-?[\d.]+\s*(?:m|mbar|hPa|C|%|dB|dBm)?$|^(DATA|LoRa receive|Starting\/restarting|Decoded CSV record|RAK message|Sending:)|^\d+\.\s|^AT\+/i.test(t)) {
       this.rawLog.push(`${stamp} ${t}`);
       if (/^={3,}/.test(t)) this.flushHeld(now);
       return;
@@ -163,8 +163,15 @@ export class GroundLink {
         if (looksLikePacket) this.process(t, { at: now });
         else this.addLog("AT", t, ev.kind === "error" ? "radio error" : undefined);
       }
+    } else if (!t.startsWith("$") && (t.match(/,/g)?.length ?? 0) < 5) {
+      // firmware banner / status text from the ground Teensy: never a telemetry line, so not an error
+      this.addLog("SYS", t);
     } else {
-      this.process(t, { at: now });
+      // the receiver sketch prints RSSI and SNR on the lines BEFORE the CSV record
+      const rx = { rssi: this.nextRssi, snr: this.nextSnr, at: now };
+      this.nextRssi = undefined;
+      this.nextSnr = undefined;
+      this.process(t, rx);
     }
     this.emit();
   }
