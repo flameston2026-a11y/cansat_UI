@@ -130,6 +130,16 @@ export class LiveFrameBuilder {
     return [head.join(","), ...rows].join("\r\n") + "\r\n";
   }
 
+  /** Every telemetry row received (all fields + rssi, snr, rxAt) for the Excel export. */
+  rows(): Values[] {
+    return this.tlmRows;
+  }
+
+  /** Mission events recorded so far. */
+  eventList(): MissionEventRec[] {
+    return this.events;
+  }
+
   /** Team ID from the latest packet (for the Flight_<TEAM_ID>.csv file name). */
   teamId(): string {
     const t = this.tlm?.teamId;
@@ -164,7 +174,7 @@ export class LiveFrameBuilder {
     this.tlmAt = rx.at;
     this.received++;
     void raw;
-    this.tlmRows.push(v);
+    this.tlmRows.push({ ...v, rssi: rx.rssi ?? this.rssi, snr: rx.snr ?? this.snr, rxAt: rx.at });
     if (this.tlmRows.length > 20000) this.tlmRows.shift();
 
     // packet loss from gaps in PACKET COUNT
@@ -223,6 +233,8 @@ export class LiveFrameBuilder {
       }
     }
 
+    if (Number.isFinite(num(v.gsp))) this.groundSpeed = num(v.gsp);
+
     // history row
     const axis = this.axisNow(time);
     const lnd = this.lnd && rx.at - this.lndAt < 5000 ? this.lnd : null;
@@ -231,7 +243,7 @@ export class LiveFrameBuilder {
     const err = hasFix ? Math.hypot(e - tE, n - tN) : NAN;
     const volt = num(v.volt);
     const curr = num(v.curr);
-    const tof = lnd ? num(lnd.tofMm) : NAN;
+    const tof = lnd && Number.isFinite(num(lnd.tofMm)) ? num(lnd.tofMm) : num(v.tof);
     this.history.push({
       t: axis,
       alt,
@@ -246,7 +258,7 @@ export class LiveFrameBuilder {
       az: num(v.az),
       gx: num(v.gx),
       gy: num(v.gy),
-      gz: num(v.spin),
+      gz: Number.isFinite(num(v.gz)) ? num(v.gz) : num(v.spin),
       mx: num(v.mx),
       my: num(v.my),
       mz: num(v.mz),
@@ -440,12 +452,12 @@ export class LiveFrameBuilder {
         ax: num(v.ax),
         ay: num(v.ay),
         az: num(v.az),
-        gx: NAN,
-        gy: NAN,
-        gz: num(v.spin),
-        mx: NAN,
-        my: NAN,
-        mz: NAN,
+        gx: num(v.gx),
+        gy: num(v.gy),
+        gz: Number.isFinite(num(v.gz)) ? num(v.gz) : num(v.spin),
+        mx: num(v.mx),
+        my: num(v.my),
+        mz: num(v.mz),
         roll,
         pitch,
         yaw: lnd ? num(lnd.yaw) : NAN,
@@ -455,10 +467,10 @@ export class LiveFrameBuilder {
       sht: { temp: num(v.temp), rh: num(v.hum) },
       ina: { busV: volt, currentMA: curr, powerMW: volt * curr },
       gnss,
-      tof: {
-        mm: lnd && Number.isFinite(num(lnd.tofMm)) && num(lnd.tofMm) >= 0 ? num(lnd.tofMm) : null,
-        valid: !!lnd && num(lnd.tofMm) >= 0,
-      },
+      tof: (() => {
+        const mm = lnd && Number.isFinite(num(lnd.tofMm)) ? num(lnd.tofMm) : num(v.tof);
+        return { mm: Number.isFinite(mm) && mm >= 0 ? mm : null, valid: Number.isFinite(mm) && mm >= 0 };
+      })(),
       rssi: this.rssi,
       snr: this.snr,
       linkQuality,

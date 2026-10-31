@@ -1,17 +1,30 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTelemetry, type PlaybackSpeed } from "../telemetry";
 import { GroundLink, type CmdStageCb, type LinkFormat } from "./groundLink";
+import { buildSessionXlsx } from "./exportXlsx";
+import { LiveFrameBuilder } from "./liveFrame";
 import { RAK_RX, asciiToHex, hexToAscii } from "./protocol";
 import { openSerial, serialSupported, type OpenSerial } from "./serialPort";
 import { VirtualCansat } from "./virtualCansat";
 
-export type SourceMode = "sim" | "loopback" | "serial" | "replay";
+export type SourceMode = "sim" | "none" | "loopback" | "serial" | "replay";
 export type LinkStatus = "idle" | "connecting" | "connected" | "error";
 const SPEED: Record<PlaybackSpeed, number> = { "1x": 1, "5x": 5, "10x": 10 };
 const TICK = 0.2;
 
 function download(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadBytes(name: string, bytes: Uint8Array) {
+  const url = URL.createObjectURL(
+    new Blob([bytes as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+  );
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
@@ -34,6 +47,9 @@ export function useGroundLink(speed: PlaybackSpeed, paused: boolean) {
   const [baud, setBaud] = useState(115200);
   const [format, setFormatState] = useState<LinkFormat>("raw");
   const [label, setLabel] = useState("built-in simulator");
+  /** false: the link keeps logging but the website sections show the empty state ("Disconnect from website") */
+  const [published, setPublished] = useState(true);
+  const emptyFrame = useMemo(() => new LiveFrameBuilder().frame(Date.now()), []);
 
   const sim = useTelemetry(speed, paused || mode !== "sim");
 
@@ -100,6 +116,7 @@ export function useGroundLink(speed: PlaybackSpeed, paused: boolean) {
     async (m: SourceMode) => {
       await stopAll();
       setError(null);
+      setPublished(true);
       setModeState(m);
       if (m === "sim") {
         setStatus("connected");
@@ -113,6 +130,29 @@ export function useGroundLink(speed: PlaybackSpeed, paused: boolean) {
     },
     [link, stopAll],
   );
+
+  /** Stop the simulation everywhere on the site and clear every section back to its empty state. */
+  const stopSimulation = useCallback(async () => {
+    await stopAll();
+    link.reset();
+    setError(null);
+    setPublished(true);
+    setModeState("none");
+    setLiveFrame(link.builder.frame(Date.now()));
+    setStatus("idle");
+    setLabel("simulation stopped · no data");
+  }, [link, stopAll]);
+
+  const startSimulation = useCallback(async () => {
+    await stopAll();
+    link.reset();
+    setError(null);
+    setPublished(true);
+    setModeState("sim");
+    setStatus("connected");
+    setLabel("built-in simulator");
+    sim.restart();
+  }, [link, sim, stopAll]);
 
   const wrap = (line: string) =>
     formatRef.current === "rak"
@@ -169,6 +209,7 @@ export function useGroundLink(speed: PlaybackSpeed, paused: boolean) {
         },
       );
       serialRef.current = port;
+      setPublished(true); // the data goes to every section as soon as the port opens
       link.setTransport({ write: port.write });
       setLabel(port.label);
       setStatus("connected");
@@ -180,6 +221,20 @@ export function useGroundLink(speed: PlaybackSpeed, paused: boolean) {
       setError(msg.includes("No port selected") ? null : msg);
     }
   }, [baud, link, stopAll]);
+
+  /** "Connect to website": show the live data in every section (opens the port first if it is not open). */
+  const connectToWebsite = useCallback(async () => {
+    if (serialRef.current) {
+      setPublished(true);
+      setLiveFrame(link.builder.frame(Date.now()));
+      link.info("live data connected to the website");
+    } else await connectSerial();
+  }, [connectSerial, link]);
+
+  const disconnectFromWebsite = useCallback(() => {
+    setPublished(false);
+    link.info("live data hidden from the website (port still logging)");
+  }, [link]);
 
   const loadReplay = useCallback(
     async (text: string, name: string) => {
@@ -241,7 +296,18 @@ export function useGroundLink(speed: PlaybackSpeed, paused: boolean) {
     format,
     setFormat: setFormatState,
     live: mode !== "sim",
-    cansat: mode === "sim" ? sim.cansat : liveFrame,
+    published,
+    cansat: mode === "sim" ? sim.cansat : published ? liveFrame : emptyFrame,
+    stopSimulation,
+    startSimulation,
+    connectToWebsite,
+    disconnectFromWebsite,
+    downloadXlsx: () =>
+      downloadBytes(
+        `Flight_${link.builder.teamId() || "2026-IN-SPACe-CAN-7USAT-020"}.xlsx`,
+        buildSessionXlsx(link.builder, link.log),
+      ),
+    teamMode: link.teamMode,
     sim,
     restart,
     startLoopback,

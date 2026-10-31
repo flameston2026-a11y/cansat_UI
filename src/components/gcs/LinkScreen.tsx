@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Download, PlugZap, Unplug, Upload } from "lucide-react";
+import { Download, Globe, GlobeLock, Play, PlugZap, Square, Unplug, Upload } from "lucide-react";
 import type { useGroundLink, SourceMode } from "./comm/useGroundLink";
 import { LND_FIELDS, TLM_FIELDS, csvCell, type FieldDef, type Values } from "./comm/protocol";
 import type { LogTag } from "./comm/groundLink";
@@ -29,7 +29,7 @@ const TAG_COLOR: Record<LogTag, string> = {
 export function LinkScreen({ link }: { link: Link }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const { mode, status, stats } = link;
-  const live = mode !== "sim";
+  const live = mode !== "sim" && mode !== "none";
   const statusChip = status === "connected" ? "OK" : status === "error" ? "FAIL" : status === "connecting" ? "WARN" : "OFF";
   const age = link.fields.tlmAt ? ((Date.now() - link.fields.tlmAt) / 1000).toFixed(1) : "—";
 
@@ -57,6 +57,33 @@ export function LinkScreen({ link }: { link: Link }) {
             </button>
           ))}
         </div>
+
+        {mode === "sim" || mode === "none" ? (
+          <div className="flex flex-wrap items-center gap-3">
+            {mode === "sim" ? (
+              <button
+                onClick={() => void link.stopSimulation()}
+                className="panel px-3 py-2 label-mono text-[10px] flex items-center gap-1.5"
+                style={{ borderColor: "var(--destructive)", color: "var(--destructive)" }}
+              >
+                <Square className="h-3.5 w-3.5" /> Stop simulation
+              </button>
+            ) : (
+              <button
+                onClick={() => void link.startSimulation()}
+                className="panel px-3 py-2 label-mono text-[10px] flex items-center gap-1.5"
+                style={{ borderColor: "var(--cansat)", color: "var(--cansat)" }}
+              >
+                <Play className="h-3.5 w-3.5" /> Start simulation
+              </button>
+            )}
+            <span className="text-[11px] opacity-70">
+              {mode === "sim"
+                ? "Stopping clears every section of the site to empty values."
+                : "Simulation stopped. Every section is empty until a live source is connected."}
+            </span>
+          </div>
+        ) : null}
 
         {mode === "serial" ? (
           <div className="flex flex-wrap items-end gap-4">
@@ -99,6 +126,19 @@ export function LinkScreen({ link }: { link: Link }) {
                 <PlugZap className="h-3.5 w-3.5" /> Connect to port
               </button>
             )}
+            <button
+              onClick={() => (link.published && status === "connected" ? link.disconnectFromWebsite() : void link.connectToWebsite())}
+              className="panel px-3 py-2 label-mono text-[10px] flex items-center gap-1.5"
+              style={{ borderColor: "var(--ok)", color: "var(--ok)" }}
+            >
+              {link.published && status === "connected" ? <GlobeLock className="h-3.5 w-3.5" /> : <Globe className="h-3.5 w-3.5" />}
+              {link.published && status === "connected" ? "Disconnect from website" : "Connect to website"}
+            </button>
+            {status === "connected" ? (
+              <span className="label-mono text-[9px]" style={{ color: link.published ? "var(--ok)" : "var(--warn)" }}>
+                {link.published ? "LIVE DATA IS SHOWN IN ALL SECTIONS" : "LOGGING ONLY · SECTIONS SHOW EMPTY STATE"}
+              </span>
+            ) : null}
             {!link.serialSupported ? (
               <span className="text-[11px]" style={{ color: "var(--warn)" }}>
                 This browser has no Web Serial. Use Chrome or Edge.
@@ -176,7 +216,7 @@ export function LinkScreen({ link }: { link: Link }) {
         </div>
       ) : (
         <div className="well p-3 text-[12px] opacity-80">
-          The simulator is active, so there is no link traffic to show. Choose Loopback test to watch real protocol packets
+          {mode === "none" ? "The simulation is stopped and all sections are empty. " : "The simulator is active, so there is no link traffic to show. "} Choose Loopback test to watch real protocol packets
           being decoded, or Serial to connect the ground receiver.
         </div>
       )}
@@ -191,6 +231,9 @@ export function LinkScreen({ link }: { link: Link }) {
                 <div className="flex gap-1.5">
                   <button onClick={link.downloadCsv} className="panel px-2 py-1 label-mono text-[9px] flex items-center gap-1">
                     <Download className="h-3 w-3" /> Flight CSV
+                  </button>
+                  <button onClick={link.downloadXlsx} className="panel px-2 py-1 label-mono text-[9px] flex items-center gap-1" style={{ color: "var(--ok)" }}>
+                    <Download className="h-3 w-3" /> Excel (.xlsx)
                   </button>
                   <button onClick={link.downloadRawLog} className="panel px-2 py-1 label-mono text-[9px] flex items-center gap-1">
                     <Download className="h-3 w-3" /> Raw log

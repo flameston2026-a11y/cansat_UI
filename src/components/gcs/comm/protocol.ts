@@ -178,6 +178,7 @@ export type Parsed =
   | { kind: "evt"; met: number; label: string; raw: string }
   | { kind: "ack"; id: number; ok: boolean; reason?: string; raw: string }
   | { kind: "exe"; id: number; ok: boolean; reason?: string; raw: string }
+  | { kind: "tack"; cmd: string; result: string; info: string; raw: string }
   | { kind: "header"; raw: string }
   | { kind: "error"; error: string; raw: string };
 
@@ -230,6 +231,105 @@ export function parseKvTest(raw: string, time: number, count: number): Parsed {
   return { kind: "tlm", values, warnings, raw };
 }
 
+
+// ---- the team's ground-station / CanSat firmware: 28 comma separated fields ---------------
+export const TEAM_FIELD_COUNT = 28;
+const MG_TO_MS2 = 0.00980665;
+
+/**
+ * The CanSat firmware sends 28 fields (its own SD-card log layout). `key` is where the value lands in
+ * the website's telemetry record, `scale` converts the team's unit to the website's unit.
+ * CONFIRMED from the ground-station sketch: pressure hPa, acceleration mg, gyro dps, magnetometer uT, GPS speed km/h.
+ */
+export const TEAM_COLUMNS: { name: string; key: string; scale?: number; text?: boolean }[] = [
+  { name: "team_id", key: "teamId", text: true },
+  { name: "sequence", key: "count" },
+  { name: "elapsed_s", key: "time" },
+  { name: "flight_state", key: "state", text: true },
+  { name: "relative_altitude_m", key: "alt" },
+  { name: "pressure_hpa", key: "press", scale: 100 },
+  { name: "temperature_C", key: "temp" },
+  { name: "humidity_pct", key: "hum" },
+  { name: "tof_mm", key: "tof" },
+  { name: "accel_x_mg", key: "ax", scale: MG_TO_MS2 },
+  { name: "accel_y_mg", key: "ay", scale: MG_TO_MS2 },
+  { name: "accel_z_mg", key: "az", scale: MG_TO_MS2 },
+  { name: "gyro_x_dps", key: "gx" },
+  { name: "gyro_y_dps", key: "gy" },
+  { name: "gyro_z_dps", key: "gz" },
+  { name: "mag_x_uT", key: "mx" },
+  { name: "mag_y_uT", key: "my" },
+  { name: "mag_z_uT", key: "mz" },
+  { name: "gps_latitude_deg", key: "lat" },
+  { name: "gps_longitude_deg", key: "lon" },
+  { name: "gps_altitude_m", key: "gnssAlt" },
+  { name: "gps_satellites", key: "sats" },
+  { name: "ina_bus_voltage_V", key: "volt" },
+  { name: "ina_current_mA", key: "curr" },
+  { name: "ina_power_mW", key: "pwr" },
+  { name: "gps_speed_kmph", key: "gsp", scale: 1 / 3.6 },
+  { name: "servo_angle_deg", key: "servo" },
+  { name: "esc_signal_us", key: "esc" },
+];
+
+/** Rulebook form of the team number: "020" -> "2026-IN-SPACe-CAN-7USAT-020". */
+export function fullTeamId(id: string): string {
+  const t = id.trim();
+  return /^\d{1,3}$/.test(t) ? `2026-IN-SPACe-CAN-7USAT-${t.padStart(3, "0")}` : t;
+}
+
+const NUM = /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/;
+
+/** Decode the team's 28-field line. Empty, "nan" and unreadable cells become NaN (shown as a dash). */
+export function parseTeam28(cols: string[], raw: string): Parsed {
+  if (cols.length !== TEAM_FIELD_COUNT) return { kind: "error", error: `TLM expected ${TEAM_FIELD_COUNT} fields, got ${cols.length}`, raw };
+  const values: Values = {};
+  const warnings: string[] = [];
+  TEAM_COLUMNS.forEach((c, i) => {
+    const t = cols[i].trim();
+    if (c.text) {
+      values[c.key] = c.key === "teamId" ? fullTeamId(t) : t;
+      return;
+    }
+    if (!NUM.test(t)) {
+      values[c.key] = NaN;
+      if (t !== "" && !/^(nan|inf|-?inf|null|none|-)$/i.test(t)) warnings.push(`${c.name}: "${t}" is not a number`);
+      return;
+    }
+    let v = Number(t) * (c.scale ?? 1);
+    const def = TLM_FIELDS.find((d) => d.key === c.key);
+    if (def) {
+      if (def.type === "int") v = Math.round(v);
+      if ((def.min !== undefined && v < def.min) || (def.max !== undefined && v > def.max)) {
+        warnings.push(`${def.label}: ${v} outside ${def.min}..${def.max}`);
+        v = NaN;
+      }
+    }
+    values[c.key] = v;
+  });
+  // GPS without a fix is reported as 0,0 by most receivers: treat it as "no reading"
+  if (values.lat === 0 && values.lon === 0) {
+    values.lat = NaN;
+    values.lon = NaN;
+  }
+  const g = [values.gx, values.gy, values.gz].map(Number);
+  values.spin = g.every(Number.isFinite) ? Math.hypot(g[0], g[1], g[2]) : NaN; // spin rate = gyro magnitude
+  values.roll = NaN;
+  values.pitch = NaN;
+  if (Number.isFinite(Number(values.gsp))) values.gsp = Number(values.gsp);
+  return { kind: "tlm", values, warnings, raw };
+}
+
+/** Team command reply and event lines: "ACK,020,START,OK,info" and "EVT,020,12.5,NAME". */
+function parseTeamControl(cols: string[], raw: string): Parsed | null {
+  const head = cols[0].trim().toUpperCase();
+  if (head === "ACK" && cols.length >= 4)
+    return { kind: "tack", cmd: cols[2].trim().toUpperCase(), result: cols[3].trim().toUpperCase(), info: cols.slice(4).join(",").trim(), raw };
+  if (head === "EVT" && cols.length >= 4 && /^\d{1,3}$/.test(cols[1].trim()))
+    return { kind: "evt", met: Number(cols[2]), label: cols.slice(3).join(",").trim().toUpperCase(), raw };
+  return null;
+}
+
 export function parseLine(rawLine: string): Parsed | null {
   const raw = rawLine.replace(/[\r\n]+/g, "").trim();
   if (raw === "") return null;
@@ -265,6 +365,9 @@ export function parseLine(rawLine: string): Parsed | null {
   const u = unframe(raw, false);
   if (!u.ok) return { kind: "error", error: u.error, raw };
   const cols = u.body.split(",");
+  const ctl = parseTeamControl(cols, raw);
+  if (ctl) return ctl;
+  if (cols.length === TEAM_FIELD_COUNT) return parseTeam28(cols, raw);
   if (cols[0].trim().toUpperCase() === "TEAM_ID" || cols[0].trim().toUpperCase() === "TEAM ID") return { kind: "header", raw };
   const wide = expandWire(cols);
   if ("error" in wide) return { kind: "error", error: `TLM ${wide.error}`, raw };

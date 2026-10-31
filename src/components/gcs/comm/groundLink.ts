@@ -1,6 +1,7 @@
 import { LiveFrameBuilder } from "./liveFrame";
 import {
   LineSplitter,
+  TEAM_FIELD_COUNT,
   RAK_RX,
   encodeCmd,
   isKvTestLine,
@@ -53,6 +54,11 @@ export class GroundLink {
   private nextRssi?: number;
   private nextSnr?: number;
   private cmdId = 1;
+  /** receiver "CANSAT TELEMETRY" block being collected: label -> value text */
+  private block: Record<string, string> | null = null;
+  /** true once the team's ground-station sketch has been recognised (plain START/STOP/STATUS/RESET commands) */
+  teamMode = false;
+  private teamPending: { cmd: string; cb: CmdStageCb; timer: ReturnType<typeof setTimeout> } | null = null;
   private listeners = new Set<() => void>();
 
   subscribe(fn: () => void) {
@@ -79,6 +85,7 @@ export class GroundLink {
     this.kvFirstAt = 0;
     this.kvCount = 0;
     this.held = null;
+    this.block = null;
     this.log = [];
     this.rawLog = [];
     this.cancelPending("RESET");
@@ -118,6 +125,12 @@ export class GroundLink {
     // human-readable banner lines below it are duplicates and are not packets
     t = t.replace(/^RAW RAK:\s*/i, "");
     const stamp = new Date(now).toISOString();
+
+    // ---- the team's receiver sketch --------------------------------------------------
+    if (this.feedTeamLine(t, stamp, now)) {
+      this.emit();
+      return;
+    }
 
     // ground Teensy "pretty" output. Per packet it prints: RSSI line, a bare 13-value line
     // (ALT,P,T,H,AX,AY,AZ,GX,GY,GZ,MX,MY,MZ), an SNR line, then a decorated block that repeats
@@ -184,6 +197,7 @@ export class GroundLink {
       p = parseKvTest(payload.trim(), (rx.at - this.kvFirstAt) / 1000, ++this.kvCount);
     } else p = parseLine(payload);
     if (!p) return;
+    if (p.kind === "tlm" && p.raw.split(",").length === TEAM_FIELD_COUNT) this.teamMode = true;
     switch (p.kind) {
       case "tlm":
         this.addLog("TLM", p.raw, p.warnings.length ? p.warnings.join("; ") : undefined);
@@ -205,6 +219,10 @@ export class GroundLink {
         this.addLog("EXE", p.raw, p.ok ? undefined : p.reason);
         this.onExe(p.id, p.ok, p.reason);
         break;
+      case "tack":
+        this.addLog("ACK", p.raw, p.result === "OK" ? undefined : p.result);
+        this.onTeamAck(p.cmd, p.result, p.info);
+        break;
       case "header":
         this.addLog("SYS", p.raw, "header row ignored");
         break;
@@ -214,6 +232,149 @@ export class GroundLink {
         break;
     }
   }
+
+
+  // ---- team ground-station output ------------------------------------------------------------
+  private static readonly BLOCK_KEYS: [string, RegExp][] = [
+    ["id", /^Team ID \/ Sequence\s*:\s*(.*)$/i],
+    ["elapsed", /^Elapsed time\s*:\s*(.*?)\s*s?$/i],
+    ["state", /^Flight state\s*:\s*(.*)$/i],
+    ["alt", /^Relative altitude\s*:\s*(.*?)\s*m?$/i],
+    ["press", /^Pressure\s*:\s*(.*?)\s*hPa$/i],
+    ["temp", /^Temperature\s*:\s*(.*?)\s*(?:°?\s*C)?$/i],
+    ["hum", /^Humidity\s*:\s*(.*?)\s*%?$/i],
+    ["tof", /^ToF distance\s*:\s*(.*?)\s*mm$/i],
+    ["acc", /^Acceleration XYZ\s*:\s*(.*?)\s*mg$/i],
+    ["gyro", /^Gyroscope XYZ\s*:\s*(.*?)\s*dps$/i],
+    ["mag", /^Magnetometer XYZ\s*:\s*(.*?)\s*uT$/i],
+    ["lat", /^GPS latitude\s*:\s*(.*)$/i],
+    ["lon", /^GPS longitude\s*:\s*(.*)$/i],
+    ["galt", /^GPS altitude\s*:\s*(.*?)\s*m?$/i],
+    ["sats", /^GPS satellites\s*:\s*(.*)$/i],
+    ["volt", /^INA bus voltage\s*:\s*(.*?)\s*V$/i],
+    ["curr", /^INA current\s*:\s*(.*?)\s*mA$/i],
+    ["pwr", /^INA power\s*:\s*(.*?)\s*mW$/i],
+    ["speed", /^GPS speed\s*:\s*(.*?)\s*km\/h$/i],
+    ["servo", /^Servo angle\s*:\s*(.*?)\s*deg$/i],
+    ["esc", /^ESC signal\s*:\s*(.*?)\s*us$/i],
+  ];
+
+  /** Returns true when the line belonged to the team receiver's own output and was handled here. */
+  private feedTeamLine(t: string, stamp: string, now: number): boolean {
+    const raw = () => this.rawLog.push(`${stamp} ${t}`);
+
+    if (/^=+\s*CANSAT TELEMETRY\s*=+$/i.test(t)) {
+      raw();
+      this.teamMode = true;
+      this.block = {};
+      return true;
+    }
+    if (this.block) {
+      raw();
+      if (/^=+$/.test(t)) {
+        const b = this.block;
+        this.block = null;
+        this.finishBlock(b, now);
+        return true;
+      }
+      const lvl = /^LoRa RSSI \/ SNR\s*:\s*(-?[\d.]+)\s*dBm\s*\/\s*(-?[\d.]+)\s*dB/i.exec(t);
+      if (lvl) {
+        this.block.rssi = lvl[1];
+        this.block.snr = lvl[2];
+        return true;
+      }
+      for (const [k, re] of GroundLink.BLOCK_KEYS) {
+        const m = re.exec(t);
+        if (m) {
+          this.block[k] = m[1].trim();
+          return true;
+        }
+      }
+      return true; // "Packets received", "SD log", anything else inside the block
+    }
+    // single-line forms
+    if (/^\[RADIO\]/i.test(t) || /^\[SD\]/i.test(t) || /^(Packets received|SD log)\s*:/i.test(t)) {
+      raw();
+      this.teamMode = true;
+      return true;
+    }
+    let m: RegExpExecArray | null;
+    if ((m = /^\[ACK from CanSat\]\s*(.*)$/i.exec(t))) {
+      raw();
+      this.teamMode = true;
+      const f = m[1].split(",");
+      const cmd = (f[0] ?? "").trim().toUpperCase();
+      const result = (f[1] ?? "").trim().toUpperCase();
+      this.addLog("ACK", t, result && result !== "OK" ? result : undefined);
+      this.onTeamAck(cmd, result, f.slice(2).join(",").trim());
+      return true;
+    }
+    if ((m = /^>>>\s*(\w+)\s+CONFIRMED/i.exec(t))) {
+      raw();
+      this.teamMode = true;
+      this.addLog("ACK", t);
+      this.onTeamAck(m[1].toUpperCase(), "OK", "");
+      return true;
+    }
+    if (/^!!!\s*No ACK for\s+(\w+)/i.test(t)) {
+      raw();
+      const c = /^!!!\s*No ACK for\s+(\w+)/i.exec(t)![1].toUpperCase();
+      this.addLog("SYS", t, "no acknowledgement");
+      this.onTeamAck(c, "NO ACK", "");
+      return true;
+    }
+    if ((m = /^\[FLIGHT EVENT\]\s*T\+\s*([\d.]+)\s*s\s*:\s*(.*)$/i.exec(t))) {
+      raw();
+      this.teamMode = true;
+      this.process(`EVT,${this.builder.teamId().split("-").pop() || "000"},${m[1]},${m[2].trim()}`, { at: now });
+      return true;
+    }
+    return false;
+  }
+
+  /** Rebuild the 28-field line from a printed block and decode it like any other packet. */
+  private finishBlock(b: Record<string, string>, now: number) {
+    const id = (b.id ?? "").split("/");
+    const xyz = (s?: string) => {
+      const a = (s ?? "").split(",").map((x) => x.trim());
+      return [a[0] ?? "", a[1] ?? "", a[2] ?? ""];
+    };
+    const [ax, ay, az] = xyz(b.acc);
+    const [gx, gy, gz] = xyz(b.gyro);
+    const [mx, my, mz] = xyz(b.mag);
+    const cells = [
+      (id[0] ?? "").trim(), (id[1] ?? "").trim(), b.elapsed ?? "", b.state ?? "", b.alt ?? "", b.press ?? "", b.temp ?? "",
+      b.hum ?? "", b.tof ?? "", ax, ay, az, gx, gy, gz, mx, my, mz, b.lat ?? "", b.lon ?? "", b.galt ?? "", b.sats ?? "",
+      b.volt ?? "", b.curr ?? "", b.pwr ?? "", b.speed ?? "", b.servo ?? "", b.esc ?? "",
+    ].map((c) => c.replace(/,/g, ";"));
+    if (cells.length !== TEAM_FIELD_COUNT) return;
+    const last = this.builder.snapshotFields();
+    if (last.tlm && Number(last.tlm.count) === Number(cells[1]) && now - last.tlmAt < 1500) return; // same packet already decoded from +EVT
+    const rssi = b.rssi !== undefined ? Number(b.rssi) : undefined;
+    const snr = b.snr !== undefined ? Number(b.snr) : undefined;
+    this.process(cells.join(","), { rssi, snr, at: now });
+  }
+
+  /** Team firmware answers: CMD,RESULT. Resolves the command the operator sent. */
+  private onTeamAck(cmd: string, result: string, _info: string) {
+    const p = this.teamPending;
+    if (!p || p.cmd !== cmd) return;
+    clearTimeout(p.timer);
+    this.teamPending = null;
+    if (result === "OK" || result === "DONE" || result === "") {
+      p.cb("ACK");
+      p.cb("PASS");
+    } else if (result === "NO ACK") p.cb("NAK", "NO ACK from CanSat");
+    else p.cb("FAIL", result);
+  }
+
+  /** Command names the website uses -> the words the team's sketch understands. */
+  private static readonly TEAM_CMD: Record<string, string> = {
+    START: "START", START_TRANSMISSION: "START", CXON: "START",
+    STOP: "STOP", STOP_TELEMETRY: "STOP", CXOFF: "STOP",
+    STATUS: "STATUS", PING: "STATUS",
+    RESET: "RESET",
+  };
 
   // ---- transmit ---------------------------------------------------------------------
   private async write(line: string, log = true) {
@@ -232,6 +393,29 @@ export class GroundLink {
     const { name, args } = splitCommandText(commandText);
     if (!this.transport) {
       cb("NAK", "NOT CONNECTED");
+      return;
+    }
+    if (this.teamMode) {
+      const word = GroundLink.TEAM_CMD[name.toUpperCase()];
+      if (!word) {
+        cb("NAK", "NOT SUPPORTED BY CANSAT FIRMWARE");
+        return;
+      }
+      if (this.teamPending) {
+        clearTimeout(this.teamPending.timer);
+        this.teamPending.cb("NAK", "SUPERSEDED");
+      }
+      const timer = setTimeout(() => {
+        this.teamPending = null;
+        cb("NAK", "NO ACK (timeout)");
+        this.addLog("SYS", `command ${word}: no ACK within 30 s`);
+        this.emit();
+      }, 30000);
+      this.teamPending = { cmd: word, cb, timer };
+      void this.write(word, false).then(() => {
+        this.addLog("TX", word, "team ground station repeats it until the CanSat acknowledges");
+        this.emit();
+      });
       return;
     }
     const id = this.cmdId++;
@@ -288,6 +472,11 @@ export class GroundLink {
       p.cb("NAK", reason);
     }
     this.pending.clear();
+    if (this.teamPending) {
+      clearTimeout(this.teamPending.timer);
+      this.teamPending.cb("NAK", reason);
+      this.teamPending = null;
+    }
   }
 
   dispose() {
